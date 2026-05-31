@@ -1,12 +1,17 @@
 // controllers/authController.js
 const db = require("../config/db");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-// Register a User (Handles Admin creation or Student profile binding natively via Transaction)
+// Register a User (Password hashing stripped per Cybersecurity instruction)
 exports.register = async (req, res) => {
   const { name, email, password, role, matric_no, department, current_level } =
     req.body;
+
+  if (!email || !password || !name) {
+    return res
+      .status(400)
+      .json({ message: "Missing required core registration fields." });
+  }
 
   try {
     // Check if user already exists
@@ -19,17 +24,13 @@ exports.register = async (req, res) => {
         .json({ message: "User already exists with this email." });
     }
 
-    // Encrypt password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Determine target role
+    // Determine target role boundary
     const assignedRole = role === "admin" ? "admin" : "student";
 
     // Begin isolated PostgreSQL Transaction
     await db.query("BEGIN");
 
-    // Insert Base User profile
+    // Insert Base User profile with raw password input string
     const userInsertQuery = `
       INSERT INTO users (name, email, password, role)
       VALUES ($1, $2, $3, $4)
@@ -38,12 +39,12 @@ exports.register = async (req, res) => {
     const userResult = await db.query(userInsertQuery, [
       name,
       email,
-      hashedPassword,
+      password,
       assignedRole,
     ]);
     const newUser = userResult.rows[0];
 
-    // If registering a student, attach full academic extensions dynamically
+    // If registering a student, attach academic metrics synchronously
     if (assignedRole === "student") {
       if (!matric_no || !department) {
         await db.query("ROLLBACK");
@@ -69,24 +70,22 @@ exports.register = async (req, res) => {
     // Commit Transaction safely
     await db.query("COMMIT");
 
-    // Generate Token
+    // Generate JSON Web Token
     const token = jwt.sign(
       { id: newUser.id, role: newUser.role },
       process.env.JWT_SECRET,
       { expiresIn: "1d" },
     );
 
-    res
-      .status(201)
-      .json({
-        token,
-        user: {
-          id: newUser.id,
-          name: newUser.name,
-          email: newUser.email,
-          role: newUser.role,
-        },
-      });
+    res.status(201).json({
+      token,
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+      },
+    });
   } catch (error) {
     await db.query("ROLLBACK");
     console.error("Registration Error:", error);
@@ -94,7 +93,7 @@ exports.register = async (req, res) => {
   }
 };
 
-// Login Route
+// Login Route (Direct comparison match)
 exports.login = async (req, res) => {
   const { email, password } = req.body;
 
@@ -109,9 +108,8 @@ exports.login = async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Compare encrypted hash passwords
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
+    // Direct match comparison for testing or custom cryptography intercepts
+    if (password !== user.password) {
       return res.status(400).json({ message: "Invalid Credentials" });
     }
 
@@ -122,7 +120,7 @@ exports.login = async (req, res) => {
       role: user.role,
     };
 
-    // If the user is a student, read their structural primary academic metrics
+    // If user is a student, pull academic metadata fields
     if (user.role === "student") {
       const studentResult = await db.query(
         "SELECT * FROM students WHERE user_id = $1",
