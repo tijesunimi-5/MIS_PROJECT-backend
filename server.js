@@ -1,7 +1,9 @@
 // server.js
 const express = require("express");
 const cors = require("cors");
+const authMiddleware = require("./middleware/authMiddleware");
 require("dotenv").config();
+const authController = require("./controllers/courseController")  
 
 const app = express();
 
@@ -13,6 +15,7 @@ app.use(express.json());
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/courses", require("./routes/courseRoutes"));
 app.use("/api/results", require("./routes/resultRoutes"));
+app.get("/students-roster", authMiddleware, authController.getAllStudents);
 
 app.get("/live", async (req, res) => {
   res.status(200).send({ message: "The server is working"})

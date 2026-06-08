@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const resultController = require("../controllers/resultController");
 const authMiddleware = require("../middleware/authMiddleware");
+const authController = require("../controllers/courseController")
 
 const isAdmin = (req, res, next) => {
   if (req.user.role !== "admin")
@@ -15,5 +16,7 @@ router.get(
   authMiddleware,
   resultController.getStudentReportCard,
 );
+// Inside your routes file (e.g., routes/authRoutes.js)
+router.get("/students-roster", authMiddleware, authController.getAllStudents); 
 
 module.exports = router;
