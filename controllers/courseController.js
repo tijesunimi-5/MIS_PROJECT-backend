@@ -72,4 +72,4 @@ exports.getAllStudents = async (req, res) => {
     console.error("Get Students Catalog Error:", error);
     res.status(500).json({ message: "Server error while fetching student roster." });
   }
-};
+}
