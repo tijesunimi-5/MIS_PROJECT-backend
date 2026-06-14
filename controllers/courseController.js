@@ -55,10 +55,8 @@ exports.getAllCourses = async (req, res) => {
   }
 };
 
-// Add to your backend controllers
 exports.getAllStudents = async (req, res) => {
   try {
-    // Select the primary keys, names, and matric numbers from the relational join
     const queryText = `
       SELECT s.id AS student_id, u.name, s.matric_no 
       FROM students s
@@ -72,4 +70,4 @@ exports.getAllStudents = async (req, res) => {
     console.error("Get Students Catalog Error:", error);
     res.status(500).json({ message: "Server error while fetching student roster." });
   }
-}
+};

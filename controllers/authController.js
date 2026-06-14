@@ -2,7 +2,7 @@
 const db = require("../config/db");
 const jwt = require("jsonwebtoken");
 
-// Register a User (Password hashing stripped per Cybersecurity instruction)
+// 1. Register a User (Raw Base64 string from frontend saved directly)
 exports.register = async (req, res) => {
   const { name, email, password, role, matric_no, department, current_level } =
     req.body;
@@ -14,7 +14,6 @@ exports.register = async (req, res) => {
   }
 
   try {
-    // Check if user already exists
     const userCheck = await db.query("SELECT * FROM users WHERE email = $1", [
       email,
     ]);
@@ -24,13 +23,10 @@ exports.register = async (req, res) => {
         .json({ message: "User already exists with this email." });
     }
 
-    // Determine target role boundary
     const assignedRole = role === "admin" ? "admin" : "student";
 
-    // Begin isolated PostgreSQL Transaction
     await db.query("BEGIN");
 
-    // Insert Base User profile with raw password input string
     const userInsertQuery = `
       INSERT INTO users (name, email, password, role)
       VALUES ($1, $2, $3, $4)
@@ -44,7 +40,6 @@ exports.register = async (req, res) => {
     ]);
     const newUser = userResult.rows[0];
 
-    // If registering a student, attach academic metrics synchronously
     if (assignedRole === "student") {
       if (!matric_no || !department) {
         await db.query("ROLLBACK");
@@ -67,10 +62,8 @@ exports.register = async (req, res) => {
       ]);
     }
 
-    // Commit Transaction safely
     await db.query("COMMIT");
 
-    // Generate JSON Web Token
     const token = jwt.sign(
       { id: newUser.id, role: newUser.role },
       process.env.JWT_SECRET,
@@ -93,12 +86,11 @@ exports.register = async (req, res) => {
   }
 };
 
-// Login Route (Direct comparison match)
+// 2. Login User
 exports.login = async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    // Find the base authentication user profile
     const userResult = await db.query("SELECT * FROM users WHERE email = $1", [
       email,
     ]);
@@ -108,7 +100,6 @@ exports.login = async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Direct match comparison for testing or custom cryptography intercepts
     if (password !== user.password) {
       return res.status(400).json({ message: "Invalid Credentials" });
     }
@@ -120,7 +111,6 @@ exports.login = async (req, res) => {
       role: user.role,
     };
 
-    // If user is a student, pull academic metadata fields
     if (user.role === "student") {
       const studentResult = await db.query(
         "SELECT * FROM students WHERE user_id = $1",
@@ -144,5 +134,24 @@ exports.login = async (req, res) => {
   } catch (error) {
     console.error("Login Error:", error);
     res.status(500).json({ message: "Server error during authentication." });
+  }
+};
+
+// 3. Get Student Roster (For Admin drop-down picking)
+exports.getAllStudents = async (req, res) => {
+  try {
+    const queryText = `
+      SELECT s.id AS student_id, u.name, s.matric_no 
+      FROM students s
+      JOIN users u ON s.user_id = u.id
+      ORDER BY u.name ASC;
+    `;
+    const result = await db.query(queryText);
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Get Students Catalog Error:", error);
+    res
+      .status(500)
+      .json({ message: "Server error while fetching student roster." });
   }
 };
