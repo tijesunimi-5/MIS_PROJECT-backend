@@ -1,8 +1,9 @@
 // controllers/authController.js
 const db = require("../config/db");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt"); // 🔒 Step 1: Import bcrypt
 
-// 1. Register a User (Raw Base64 string from frontend saved directly)
+// 1. Register a User (Password gets safely hashed via bcrypt)
 exports.register = async (req, res) => {
   const { name, email, password, role, matric_no, department, current_level } =
     req.body;
@@ -25,6 +26,10 @@ exports.register = async (req, res) => {
 
     const assignedRole = role === "admin" ? "admin" : "student";
 
+    // 🔒 Step 2: Hash the password securely with 10 salt rounds before saving
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
     await db.query("BEGIN");
 
     const userInsertQuery = `
@@ -35,7 +40,7 @@ exports.register = async (req, res) => {
     const userResult = await db.query(userInsertQuery, [
       name,
       email,
-      password,
+      hashedPassword, // Save the secure hash, never the raw text
       assignedRole,
     ]);
     const newUser = userResult.rows[0];
@@ -43,11 +48,9 @@ exports.register = async (req, res) => {
     if (assignedRole === "student") {
       if (!matric_no || !department) {
         await db.query("ROLLBACK");
-        return res
-          .status(400)
-          .json({
-            message: "Matric number and department are required for students.",
-          });
+        return res.status(400).json({
+          message: "Matric number and department are required for students.",
+        });
       }
 
       const studentInsertQuery = `
@@ -86,7 +89,7 @@ exports.register = async (req, res) => {
   }
 };
 
-// 2. Login User
+// 2. Login User (Verifies against bcrypt hash match)
 exports.login = async (req, res) => {
   const { email, password } = req.body;
 
@@ -100,7 +103,9 @@ exports.login = async (req, res) => {
 
     const user = userResult.rows[0];
 
-    if (password !== user.password) {
+    // 🔒 Step 3: Compare the incoming raw/base64 string password with the hashed database password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
       return res.status(400).json({ message: "Invalid Credentials" });
     }
 
