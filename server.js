@@ -3,7 +3,6 @@ const express = require("express");
 const cors = require("cors");
 const authMiddleware = require("./middleware/authMiddleware");
 require("dotenv").config();
-const authController = require("./controllers/courseController")  
 
 const app = express();
 

@@ -21,7 +21,7 @@ function encrypt(text) {
 
 // Decrypts AES-256-CBC hex string back to clear text
 function decrypt(text) {
-  if (!text || !text.includes(":")) return text;
+  if (!text || typeof text !== "string" || !text.includes(":")) return text;
   try {
     const [ivHex, encryptedText] = text.split(":");
     const iv = Buffer.from(ivHex, "hex");
@@ -35,4 +35,14 @@ function decrypt(text) {
   }
 }
 
-module.exports = { encrypt, decrypt };
+// SHA-256 Blind Index Hashing for O(1) SQL queries
+function hashData(text) {
+  if (!text) return null;
+  return crypto
+    .createHash("sha256")
+    .update(String(text).trim().toLowerCase())
+    .digest("hex");
+}
+
+module.exports = { encrypt, decrypt, hashData };
+

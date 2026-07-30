@@ -2,7 +2,7 @@
 const db = require("../config/db");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
-const { encrypt, decrypt } = require("../utils/encryption"); // 🔒 Import AES-256 helpers
+const { encrypt, decrypt, hashData } = require("../utils/encryption");
 
 // 1. Register User (Works for both Admin and Student roles)
 exports.register = async (req, res) => {
@@ -16,27 +16,14 @@ exports.register = async (req, res) => {
   }
 
   try {
-    // ⚡ Auto-migrate table column types to TEXT to hold long AES ciphertext
-    await db
-      .query(
-        `
-      ALTER TABLE users ALTER COLUMN password TYPE TEXT;
-      ALTER TABLE users ALTER COLUMN name TYPE TEXT;
-      ALTER TABLE users ALTER COLUMN email TYPE TEXT;
-      ALTER TABLE users ALTER COLUMN role TYPE TEXT;
-      ALTER TABLE students ALTER COLUMN matric_no TYPE TEXT;
-      ALTER TABLE students ALTER COLUMN department TYPE TEXT;
-    `,
-      )
-      .catch((err) => console.log("Schema migration note:", err.message));
+    const cleanEmail = email.trim().toLowerCase();
+    const emailHash = hashData(cleanEmail);
 
-    // 🔒 1. Check if user already exists (Decryption-assisted email lookup)
-    const allUsers = await db.query("SELECT * FROM users");
-    const existingUser = allUsers.rows.find(
-      (u) => decrypt(u.email).toLowerCase() === email.trim().toLowerCase(),
-    );
+    // 🔒 1. O(1) Indexed lookup using SHA-256 blind index
+    const checkQuery = "SELECT * FROM users WHERE email_hash = $1";
+    const existingResult = await db.query(checkQuery, [emailHash]);
 
-    if (existingUser) {
+    if (existingResult.rows.length > 0) {
       return res
         .status(400)
         .json({ message: "User already exists with this email." });
@@ -49,23 +36,25 @@ exports.register = async (req, res) => {
 
     // 🔒 3. Encrypt ALL Plaintext Profile Fields with AES-256
     const encryptedName = encrypt(name.trim());
-    const encryptedEmail = encrypt(email.trim().toLowerCase());
+    const encryptedEmail = encrypt(cleanEmail);
     const encryptedRole = encrypt(assignedRole);
     const encryptedMatric = matric_no ? encrypt(matric_no.trim()) : null;
     const encryptedDept = department ? encrypt(department.trim()) : null;
+    const matricHash = matric_no ? hashData(matric_no.trim()) : null;
 
     await db.query("BEGIN");
 
     const userInsertQuery = `
-      INSERT INTO users (name, email, password, role)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO users (name, email, password, role, email_hash)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING id, name, email, role;
     `;
     const userResult = await db.query(userInsertQuery, [
-      encryptedName, // AES-256 Ciphertext
-      encryptedEmail, // AES-256 Ciphertext
-      hashedPassword, // Bcrypt Hash
-      encryptedRole, // AES-256 Ciphertext
+      encryptedName,
+      encryptedEmail,
+      hashedPassword,
+      encryptedRole,
+      emailHash,
     ]);
     const newUser = userResult.rows[0];
 
@@ -74,23 +63,22 @@ exports.register = async (req, res) => {
     if (assignedRole === "student") {
       if (!matric_no || !department) {
         await db.query("ROLLBACK");
-        return res
-          .status(400)
-          .json({
-            message: "Matric number and department are required for students.",
-          });
+        return res.status(400).json({
+          message: "Matric number and department are required for students.",
+        });
       }
 
       const studentInsertQuery = `
-        INSERT INTO students (user_id, matric_no, department, current_level)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO students (user_id, matric_no, department, current_level, matric_no_hash)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id;
       `;
       const studentResult = await db.query(studentInsertQuery, [
         newUser.id,
-        encryptedMatric, // AES-256 Ciphertext
-        encryptedDept, // AES-256 Ciphertext
+        encryptedMatric,
+        encryptedDept,
         current_level || 100,
+        matricHash,
       ]);
 
       createdStudentId = studentResult.rows[0].id;
@@ -98,7 +86,6 @@ exports.register = async (req, res) => {
 
     await db.query("COMMIT");
 
-    // JWT token receives clean role string for API authorization middleware
     const token = jwt.sign(
       { id: newUser.id, role: assignedRole },
       process.env.JWT_SECRET,
@@ -110,9 +97,9 @@ exports.register = async (req, res) => {
       user: {
         id: newUser.id,
         student_id: createdStudentId,
-        name: decrypt(newUser.name), // 🔓 Decrypted for UI
-        email: decrypt(newUser.email), // 🔓 Decrypted for UI
-        role: decrypt(newUser.role), // 🔓 Decrypted for UI
+        name: decrypt(newUser.name),
+        email: decrypt(newUser.email),
+        role: decrypt(newUser.role),
       },
     });
   } catch (error) {
@@ -122,16 +109,41 @@ exports.register = async (req, res) => {
   }
 };
 
-// 2. Login User (Decryption-assisted email lookup & Bcrypt password match)
+// 2. Login User (O(1) SHA-256 blind index lookup & Bcrypt password match)
 exports.login = async (req, res) => {
   const { email, password } = req.body;
 
+  if (!email || !password) {
+    return res
+      .status(400)
+      .json({ message: "Email and password are required." });
+  }
+
   try {
-    // 🔒 1. Retrieve users & match decrypted email
-    const allUsers = await db.query("SELECT * FROM users");
-    const user = allUsers.rows.find(
-      (u) => decrypt(u.email).toLowerCase() === email.trim().toLowerCase(),
+    const cleanEmail = email.trim().toLowerCase();
+    const emailHash = hashData(cleanEmail);
+
+    // 🔒 1. O(1) Fast lookup by email_hash
+    let userResult = await db.query(
+      "SELECT * FROM users WHERE email_hash = $1",
+      [emailHash],
     );
+    let user = userResult.rows[0];
+
+    // Fallback for legacy rows created before blind indexing migration
+    if (!user) {
+      const allUsers = await db.query("SELECT * FROM users");
+      user = allUsers.rows.find(
+        (u) => decrypt(u.email).toLowerCase() === cleanEmail,
+      );
+      if (user && !user.email_hash) {
+        // Backfill hash for future O(1) logins
+        await db.query("UPDATE users SET email_hash = $1 WHERE id = $2", [
+          emailHash,
+          user.id,
+        ]);
+      }
+    }
 
     if (!user) {
       return res.status(400).json({ message: "Invalid Credentials" });
@@ -143,7 +155,7 @@ exports.login = async (req, res) => {
       return res.status(400).json({ message: "Invalid Credentials" });
     }
 
-    // 🔓 3. Decrypt user profile attributes for application response
+    // 🔓 3. Decrypt user profile attributes for session
     const decryptedRole = decrypt(user.role);
 
     let dynamicUserData = {
@@ -179,7 +191,7 @@ exports.login = async (req, res) => {
   }
 };
 
-// 3. Get Student Roster (Decrypted for Admin Dropdowns)
+// 3. Get Student Roster (Provides both ciphertexts and decrypted values for Admin Vault UI)
 exports.getAllStudents = async (req, res) => {
   try {
     const queryText = `
@@ -190,11 +202,12 @@ exports.getAllStudents = async (req, res) => {
     `;
     const result = await db.query(queryText);
 
-    // 🔓 Decrypt student name & matric number before sending to admin UI
     const decryptedRoster = result.rows.map((s) => ({
       student_id: s.student_id,
       name: decrypt(s.name),
       matric_no: decrypt(s.matric_no),
+      enc_name: s.name, // Raw AES-256 ciphertext format
+      enc_matric_no: s.matric_no, // Raw AES-256 ciphertext format
     }));
 
     res.json(decryptedRoster);
@@ -205,3 +218,4 @@ exports.getAllStudents = async (req, res) => {
       .json({ message: "Server error while fetching student roster." });
   }
 };
+

@@ -1,6 +1,6 @@
 // controllers/resultController.js
 const db = require("../config/db");
-const { encrypt, decrypt } = require("../utils/encryption"); // 🔒 Import AES-256 helpers
+const { encrypt, decrypt, hashData } = require("../utils/encryption");
 
 // Helper function to dynamically process Nigerian standard university grading scales
 const computeGradeAndPoints = (total) => {
@@ -40,33 +40,27 @@ exports.uploadScore = async (req, res) => {
   const { grade, points } = computeGradeAndPoints(totalScore);
 
   try {
-    // ⚡ Auto-migrate table column types to TEXT to hold long AES ciphertext
-    await db
-      .query(
-        `
-      ALTER TABLE results ALTER COLUMN letter_grade TYPE TEXT;
-      ALTER TABLE results ALTER COLUMN semester TYPE TEXT;
-      ALTER TABLE results ALTER COLUMN academic_year TYPE TEXT;
-    `,
-      )
-      .catch((err) => console.log("Schema migration note:", err.message));
+    const cleanSemester = semester.trim();
+    const cleanYear = academic_year.trim();
+    const semesterHash = hashData(cleanSemester);
+    const yearHash = hashData(cleanYear);
 
-    // 🔒 1. Check for existing record matching student, course, decrypted semester & academic year
+    // 🔒 1. Exact SQL query lookup
     const existingRecords = await db.query(
-      "SELECT * FROM results WHERE student_id = $1 AND course_id = $2",
-      [student_id, course_id],
+      "SELECT * FROM results WHERE student_id = $1 AND course_id = $2 AND (semester_hash = $3 OR semester_hash IS NULL)",
+      [student_id, course_id, semesterHash],
     );
 
     const match = existingRecords.rows.find(
       (r) =>
-        decrypt(r.semester) === semester.trim() &&
-        decrypt(r.academic_year) === academic_year.trim(),
+        decrypt(r.semester) === cleanSemester &&
+        decrypt(r.academic_year) === cleanYear,
     );
 
     // 🔒 2. Encrypt all text fields before writing to PostgreSQL
     const encryptedGrade = encrypt(grade);
-    const encryptedSemester = encrypt(semester.trim());
-    const encryptedYear = encrypt(academic_year.trim());
+    const encryptedSemester = encrypt(cleanSemester);
+    const encryptedYear = encrypt(cleanYear);
 
     let savedResult;
 
@@ -74,8 +68,8 @@ exports.uploadScore = async (req, res) => {
       // Update existing result entry
       const updateQuery = `
         UPDATE results 
-        SET ca_score = $1, exam_score = $2, letter_grade = $3, grade_point = $4
-        WHERE id = $5
+        SET ca_score = $1, exam_score = $2, letter_grade = $3, grade_point = $4, semester_hash = $5, academic_year_hash = $6
+        WHERE id = $7
         RETURNING *;
       `;
       const updateRes = await db.query(updateQuery, [
@@ -83,14 +77,16 @@ exports.uploadScore = async (req, res) => {
         parsedExam,
         encryptedGrade,
         points,
+        semesterHash,
+        yearHash,
         match.id,
       ]);
       savedResult = updateRes.rows[0];
     } else {
       // Insert new result entry
       const insertQuery = `
-        INSERT INTO results (student_id, course_id, ca_score, exam_score, letter_grade, grade_point, semester, academic_year)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO results (student_id, course_id, ca_score, exam_score, letter_grade, grade_point, semester, academic_year, semester_hash, academic_year_hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *;
       `;
       const insertRes = await db.query(insertQuery, [
@@ -102,6 +98,8 @@ exports.uploadScore = async (req, res) => {
         points,
         encryptedSemester,
         encryptedYear,
+        semesterHash,
+        yearHash,
       ]);
       savedResult = insertRes.rows[0];
     }
@@ -113,6 +111,9 @@ exports.uploadScore = async (req, res) => {
         letter_grade: decrypt(savedResult.letter_grade),
         semester: decrypt(savedResult.semester),
         academic_year: decrypt(savedResult.academic_year),
+        enc_letter_grade: savedResult.letter_grade,
+        enc_semester: savedResult.semester,
+        enc_academic_year: savedResult.academic_year,
       },
     });
   } catch (error) {
@@ -121,12 +122,11 @@ exports.uploadScore = async (req, res) => {
   }
 };
 
-// 2. Fetch Performance & Calculate GPA/CGPA Metrics (Student Portal & Admin verification)
+// 2. Fetch Performance & Calculate GPA/CGPA Metrics
 exports.getStudentReportCard = async (req, res) => {
   const { student_id } = req.params;
 
   try {
-    // Check authorization boundary: Students can only query their own data record
     if (req.user.role === "student") {
       const accessCheck = await db.query(
         "SELECT id FROM students WHERE user_id = $1",
@@ -142,7 +142,6 @@ exports.getStudentReportCard = async (req, res) => {
       }
     }
 
-    // Comprehensive join to extract results alongside matching course unit volumes
     const resultsQuery = `
       SELECT r.*, c.course_code, c.course_title, c.unit_counts
       FROM results r
@@ -152,23 +151,34 @@ exports.getStudentReportCard = async (req, res) => {
     `;
     const resultsData = await db.query(resultsQuery, [student_id]);
 
-    // Relational calculation of GPA across individual distinct academic session sets
     const reportSummary = {};
     let totalCumulativePoints = 0;
     let totalCumulativeUnits = 0;
 
     resultsData.rows.forEach((row) => {
-      // 🔓 Decrypt all encrypted text fields from results and joined courses tables
       const decryptedYear = decrypt(row.academic_year);
       const decryptedSemester = decrypt(row.semester);
+      const decryptedGrade = decrypt(row.letter_grade);
+      const decryptedCode = decrypt(row.course_code);
+      const decryptedTitle = decrypt(row.course_title);
+
+      const parsedCa = parseFloat(row.ca_score) || 0;
+      const parsedExam = parseFloat(row.exam_score) || 0;
+      const totalScore = parsedCa + parsedExam;
 
       const decryptedRow = {
         ...row,
-        letter_grade: decrypt(row.letter_grade),
+        total_score: totalScore,
+        letter_grade: decryptedGrade,
         semester: decryptedSemester,
         academic_year: decryptedYear,
-        course_code: decrypt(row.course_code),
-        course_title: decrypt(row.course_title),
+        course_code: decryptedCode,
+        course_title: decryptedTitle,
+        enc_letter_grade: row.letter_grade,
+        enc_semester: row.semester,
+        enc_academic_year: row.academic_year,
+        enc_course_code: row.course_code,
+        enc_course_title: row.course_title,
       };
 
       const termKey = `${decryptedYear} - ${decryptedSemester} Semester`;
@@ -192,7 +202,6 @@ exports.getStudentReportCard = async (req, res) => {
       totalCumulativePoints += qualityPoints;
     });
 
-    // Finalize term-by-term GPA values
     Object.keys(reportSummary).forEach((key) => {
       const summary = reportSummary[key];
       summary.gpa =
@@ -218,3 +227,4 @@ exports.getStudentReportCard = async (req, res) => {
       .json({ message: "Server error compiling academic reports." });
   }
 };
+

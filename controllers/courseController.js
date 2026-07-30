@@ -1,6 +1,6 @@
 // controllers/courseController.js
 const db = require("../config/db");
-const { encrypt, decrypt } = require("../utils/encryption"); // 🔒 Import AES-256 helpers
+const { encrypt, decrypt, hashData } = require("../utils/encryption");
 
 // 1. Create a New Course (Admin Only - All fields AES-256 encrypted)
 exports.createCourse = async (req, res) => {
@@ -14,24 +14,13 @@ exports.createCourse = async (req, res) => {
 
   try {
     const formattedCode = course_code.trim().toUpperCase();
+    const codeHash = hashData(formattedCode);
 
-    // ⚡ Auto-migrate course table column types to TEXT for long ciphertext
-    await db
-      .query(
-        `
-      ALTER TABLE courses ALTER COLUMN course_code TYPE TEXT;
-      ALTER TABLE courses ALTER COLUMN course_title TYPE TEXT;
-    `,
-      )
-      .catch((err) => console.log("Schema migration note:", err.message));
+    // 🔒 1. O(1) Indexed lookup using SHA-256 blind index
+    const checkQuery = "SELECT * FROM courses WHERE course_code_hash = $1";
+    const existingResult = await db.query(checkQuery, [codeHash]);
 
-    // 🔒 1. Check if course_code exists (Decryption-assisted lookup in Node.js)
-    const allCourses = await db.query("SELECT * FROM courses");
-    const existingCourse = allCourses.rows.find(
-      (c) => decrypt(c.course_code).toUpperCase() === formattedCode,
-    );
-
-    if (existingCourse) {
+    if (existingResult.rows.length > 0) {
       return res
         .status(400)
         .json({ message: "A course with this code already exists." });
@@ -42,14 +31,15 @@ exports.createCourse = async (req, res) => {
     const encryptedTitle = encrypt(course_title.trim());
 
     const insertQuery = `
-      INSERT INTO courses (course_code, course_title, unit_counts)
-      VALUES ($1, $2, $3)
+      INSERT INTO courses (course_code, course_title, unit_counts, course_code_hash)
+      VALUES ($1, $2, $3, $4)
       RETURNING *;
     `;
     const result = await db.query(insertQuery, [
-      encryptedCode, // AES-256 Ciphertext in Postgres!
-      encryptedTitle, // AES-256 Ciphertext in Postgres!
+      encryptedCode,
+      encryptedTitle,
       unit_counts || 3,
+      codeHash,
     ]);
 
     const createdCourse = result.rows[0];
@@ -58,8 +48,10 @@ exports.createCourse = async (req, res) => {
       message: "Course created successfully",
       course: {
         ...createdCourse,
-        course_code: decrypt(createdCourse.course_code), // 🔓 Decrypted for UI
-        course_title: decrypt(createdCourse.course_title), // 🔓 Decrypted for UI
+        course_code: decrypt(createdCourse.course_code),
+        course_title: decrypt(createdCourse.course_title),
+        enc_course_code: createdCourse.course_code,
+        enc_course_title: createdCourse.course_title,
       },
     });
   } catch (error) {
@@ -68,16 +60,17 @@ exports.createCourse = async (req, res) => {
   }
 };
 
-// 2. Get All Courses Catalog (Decrypted for Admin and Student UI)
+// 2. Get All Courses Catalog (Provides both ciphertexts and decrypted values for Admin Vault UI)
 exports.getAllCourses = async (req, res) => {
   try {
     const result = await db.query("SELECT * FROM courses ORDER BY id ASC");
 
-    // 🔓 Decrypt ALL text fields before sending JSON response to frontend
     const decryptedCourses = result.rows.map((course) => ({
       ...course,
       course_code: decrypt(course.course_code),
       course_title: decrypt(course.course_title),
+      enc_course_code: course.course_code,
+      enc_course_title: course.course_title,
     }));
 
     res.json(decryptedCourses);
@@ -99,11 +92,12 @@ exports.getAllStudents = async (req, res) => {
 
     const result = await db.query(queryText);
 
-    // 🔓 Decrypt student profile details dynamically
     const decryptedRoster = result.rows.map((s) => ({
       student_id: s.student_id,
       name: decrypt(s.name),
       matric_no: decrypt(s.matric_no),
+      enc_name: s.name,
+      enc_matric_no: s.matric_no,
     }));
 
     res.json(decryptedRoster);
@@ -114,3 +108,4 @@ exports.getAllStudents = async (req, res) => {
       .json({ message: "Server error while fetching student roster." });
   }
 };
+
